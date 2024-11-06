@@ -157,17 +157,29 @@ def create_filters_sidebar(df):
         (float(df['Price'].min()), float(df['Price'].max()))
     )
     
-    # Brand selection
-    selected_brands = st.sidebar.multiselect(
-        "Select Brands",
-        options=sorted(df['Brand'].unique()),
-        default=sorted(df['Brand'].unique())[:5]
-    )
+    # Seller selection
+    sellers = sorted(df['Seller'].unique())
+    selected_seller = st.sidebar.selectbox("Select Seller", ['All Sellers'] + sellers)
     
+    # Filter brands based on selected seller
+    if selected_seller == 'All Sellers':
+        available_brands = sorted(df['Brand'].unique())
+    else:
+        available_brands = sorted(df[df['Seller'] == selected_seller]['Brand'].unique())
+    
+    # Brand selection with "Select All" option
+    select_all_brands = st.sidebar.checkbox("Select All Brands", value=False)
+    
+    if select_all_brands:
+        selected_brands = st.sidebar.multiselect("Select Brands", available_brands, default=available_brands)
+    else:
+        selected_brands = st.sidebar.multiselect("Select Brands", available_brands)
+
     return {
         'category': selected_category,
         'subcategory': selected_subcategory,
         'price_range': price_range,
+        'seller': selected_seller,
         'brands': selected_brands
     }
 
