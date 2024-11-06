@@ -17,7 +17,10 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from bs4 import BeautifulSoup
+import time
 import seaborn as sns
+import requests
 import matplotlib.pyplot as plt
 from io import BytesIO
 import warnings
@@ -66,6 +69,118 @@ def preprocess_individual_file(df):
         df['Review_Rating_Normalized'] = (df['Reviews Rating'] - df['Reviews Rating'].mean()) / df['Reviews Rating'].std()
 
     return df
+
+def display_product_details(products_df):
+    """
+    Display fetched product details with styling and images in Streamlit.
+    """
+    st.write("### Fetched Product Details")
+
+    # Loop through the products DataFrame and display each product
+    for _, row in products_df.iterrows():
+        # Container for each product
+        with st.container():
+            # Image and details layout
+            col1, col2 = st.columns([1, 2])
+
+            # Display the product image
+            with col1:
+                if row['Image URL'] != "N/A":
+                    st.image(row['Image URL'], use_column_width=True)
+                else:
+                    st.write("No image available")
+
+            # Display the product details
+            with col2:
+                st.markdown(f"**Title:** {row['Title']}")
+                st.markdown(f"**Price:** {row['Price']}")
+                st.markdown(f"**Rating:** {row['Rating']}")
+                st.markdown(
+                    f"[View on Amazon]({row['URL']})",
+                    unsafe_allow_html=True
+                )
+
+        # Add a horizontal divider
+        st.markdown("---")
+
+
+def fetch_amazon_details(urls):
+    """
+    Fetch product details, including images, from Amazon product URLs (without user-agent header).
+    """
+    product_data = []
+
+    for i, url in enumerate(urls):
+        try:
+            st.write(f"Fetching product {i+1}/{len(urls)}: {url}")
+
+            # Skip invalid URLs
+            if not url.startswith('http'):
+                st.warning(f"Invalid URL skipped: {url}")
+                continue
+
+            # Fetch the page content (no user-agent)
+            response = requests.get(url)
+            response.raise_for_status()  # Raise an error for bad status codes
+
+            # Parse the content with BeautifulSoup
+            soup = BeautifulSoup(response.content, 'html.parser')
+
+            # Extract product title
+            title = soup.find(id='productTitle')
+            title = title.get_text(strip=True) if title else "N/A"
+
+            # Extract product price
+            price = soup.find('span', {'class': 'a-price-whole'})
+            price = price.get_text(strip=True) if price else "N/A"
+
+            # Extract product rating
+            rating = soup.find('span', {'class': 'a-icon-alt'})
+            rating = rating.get_text(strip=True) if rating else "N/A"
+
+            # Extract image URL
+            image_tag = soup.find('img', {'id': 'landingImage'})
+            image_url = image_tag.get('data-old-hires') if image_tag and image_tag.get('data-old-hires') else (
+                image_tag.get('src') if image_tag and image_tag.get('src') else "N/A"
+            )
+
+            # Append the details to the product data list
+            product_data.append({
+                'URL': url,
+                'Title': title,
+                'Price': price,
+                'Rating': rating,
+                'Image URL': image_url
+            })
+
+        except requests.exceptions.RequestException as e:
+            st.error(f"Request error for {url}: {e}")
+            product_data.append({
+                'URL': url,
+                'Title': "Error",
+                'Price': "Error",
+                'Rating': "Error",
+                'Image URL': "Error"
+            })
+
+        except Exception as e:
+            st.error(f"Unexpected error for {url}: {e}")
+            product_data.append({
+                'URL': url,
+                'Title': "Error",
+                'Price': "Error",
+                'Rating': "Error",
+                'Image URL': "Error"
+            })
+
+        # Add a short delay to avoid throttling
+        time.sleep(2)
+
+    # Convert the product data into a DataFrame
+    return pd.DataFrame(product_data)
+
+
+
 
 def load_and_preprocess_data(uploaded_file):
     """Load and preprocess the CSV data"""
@@ -293,6 +408,7 @@ class MarketAnalyzer:
         
         # Key Performance Indicators
         self.show_kpi_metrics()
+
         
         # Market Share Analysis
         self.create_market_share_analysis()
@@ -302,6 +418,7 @@ class MarketAnalyzer:
         
         # Brand Performance Overview
         self.create_brand_performance_overview()
+
         
         return self.plots
 
@@ -315,13 +432,46 @@ class MarketAnalyzer:
                 f"{len(self.df):,}",
                 f"{self.df['Sales Trend (90 days) (%)'].mean():+.1f}% Growth"
             )
-        
+
+            if st.button("Fetch Product Details from Amazon"):
+              st.write("Fetching product details...")
+              valid_urls = self.df['URL'].dropna()
+
+              if valid_urls.empty:
+                  st.warning("No valid URLs found to fetch details.")
+              else:
+                  with st.spinner("Fetching product details..."):
+                      product_details = fetch_amazon_details(valid_urls)
+
+                  if product_details.empty:
+                      st.warning("No details were fetched. Please check the URLs.")
+                  else:
+                      # Call the display function
+                      display_product_details(product_details)
+
+                      # Allow CSV download
+                      csv = product_details.to_csv(index=False).encode('utf-8')
+                      st.download_button(
+                          label="Download Product Details as CSV",
+                          data=csv,
+                          file_name='product_details.csv',
+                          mime='text/csv',
+                      )
+
+
+
+
+                    
         with col2:
             st.metric(
                 "Monthly Revenue",
                 f"₹{self.df['Monthly Revenue'].sum():,.0f}",
                 f"{self.df['Price Trend (90 days) (%)'].mean():+.1f}% Trend"
             )
+
+            if st.button("Show All Products"):
+              st.write("### Product Details")
+              st.dataframe(self.df[['Title', 'URL','ASIN','Price','Monthly Sales']])
         
         with col3:
             st.metric(
