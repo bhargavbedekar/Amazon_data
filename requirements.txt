@@ -8,3 +8,4 @@ statsmodels
 reportlab
 seaborn
 matplotlib
+beautifulsoup4
