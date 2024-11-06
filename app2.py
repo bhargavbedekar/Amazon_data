@@ -23,6 +23,50 @@ from io import BytesIO
 import warnings
 warnings.filterwarnings('ignore')
 
+def load_and_preprocess_multiple_files(uploaded_files):
+    """Load and preprocess data from multiple files."""
+    all_data = []
+
+    for file in uploaded_files:
+        try:
+            # Read each file into a DataFrame
+            df = pd.read_csv(file)
+
+            # Apply preprocessing steps to each file
+            df = preprocess_individual_file(df)  # Reuse a helper function
+            all_data.append(df)
+        except Exception as e:
+            st.error(f"Error processing file {file.name}: {e}")
+
+    if not all_data:
+        st.warning("No valid files uploaded.")
+        return pd.DataFrame()
+
+    # Concatenate all files into one DataFrame
+    combined_df = pd.concat(all_data, ignore_index=True)
+    return combined_df
+
+def preprocess_individual_file(df):
+    """Preprocess individual file."""
+    numeric_columns = [
+        'Price', 'Monthly Sales', 'Monthly Revenue', 'Review Count',
+        'Reviews Rating', 'Sales Trend (90 days) (%)', 'Price Trend (90 days) (%)'
+    ]
+
+    for col in numeric_columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col].astype(str).str.replace('[^\d.-]', ''), errors='coerce')
+
+    # Add derived metrics if required columns exist
+    if all(col in df.columns for col in ['Monthly Revenue', 'Review Count', 'Monthly Sales', 'Price']):
+        df['Revenue_per_Review'] = df['Monthly Revenue'] / df['Review Count']
+        df['Sales_Efficiency'] = df['Monthly Sales'] / df['Price']
+
+    if 'Reviews Rating' in df.columns:
+        df['Review_Rating_Normalized'] = (df['Reviews Rating'] - df['Reviews Rating'].mean()) / df['Reviews Rating'].std()
+
+    return df
+
 def load_and_preprocess_data(uploaded_file):
     """Load and preprocess the CSV data"""
     df = pd.read_csv(uploaded_file)
@@ -207,20 +251,32 @@ if __name__ == "__main__":
     st.title("🛵 Baby Stroller Market Analysis System")
     
     # File upload
-    uploaded_file = st.file_uploader("Upload your CSV file", type=['csv'])
+    uploaded_files = st.file_uploader(
+    "Upload multiple CSV files",
+    type=['csv'],
+    accept_multiple_files=True
+)
+
     
-    if uploaded_file is not None:
-        # Load and process data
-        df = load_and_preprocess_data(uploaded_file)
-        analyzer = DataAnalyzer(df)
-        
-        # Create filters
-        filters = create_filters_sidebar(df)
-        filtered_df = apply_filters(df, filters)
-        
-        # Store data in session state
-        st.session_state['data'] = filtered_df
-        st.session_state['analyzer'] = analyzer
+    if uploaded_files:
+    # Load and preprocess multiple files
+      combined_data = load_and_preprocess_multiple_files(uploaded_files)
+
+      if not combined_data.empty:
+          st.success(f"Loaded {len(combined_data)} records from {len(uploaded_files)} files.")
+          st.dataframe(combined_data.head())  # Display a preview of the combined data
+
+          # Pass the combined data to the rest of the analysis pipeline
+          analyzer = DataAnalyzer(combined_data)
+
+          # Create filters
+          filters = create_filters_sidebar(combined_data)
+          filtered_df = apply_filters(combined_data, filters)
+
+          # Store processed data in session state
+          st.session_state['data'] = filtered_df
+          st.session_state['analyzer'] = analyzer
+
         
         # Continue with analysis...
 
@@ -312,17 +368,26 @@ class MarketAnalyzer:
             self.plots['sales_share'] = fig_sales
 
     def create_price_segment_analysis(self):
-        """Create price segment analysis"""
+        """Create price segment analysis."""
         st.subheader("Price Segment Analysis")
-        
-        # Create price segments
+
+        # Ensure valid 'Price_Segment' and 'Monthly Sales'
         self.df['Price_Segment'] = pd.qcut(
             self.df['Price'],
             q=5,
             labels=['Budget', 'Economy', 'Mid-Range', 'Premium', 'Luxury']
         )
         
-        # Segment Distribution
+        # Check and handle missing or invalid 'Monthly Sales'
+        self.df['Monthly Sales'].fillna(1, inplace=True)  # Replace NaN
+        self.df['Monthly Sales'] = self.df['Monthly Sales'].replace(0, 1)  # Replace zeros
+
+        # Validate before plotting
+        if self.df['Monthly Sales'].sum() == 0:
+            st.warning("Monthly Sales sums to zero. Unable to create treemap.")
+            return
+
+        # Segment Distribution Treemap
         fig_segment = px.treemap(
             self.df,
             path=['Price_Segment', 'Brand'],
@@ -331,8 +396,7 @@ class MarketAnalyzer:
             title='Market Segmentation'
         )
         st.plotly_chart(fig_segment, use_container_width=True)
-        self.plots['price_segments'] = fig_segment
-        
+
         # Segment Performance Metrics
         segment_metrics = self.df.groupby('Price_Segment').agg({
             'Price': ['mean', 'min', 'max'],
@@ -340,9 +404,10 @@ class MarketAnalyzer:
             'Monthly Revenue': 'sum',
             'Reviews Rating': 'mean'
         }).round(2)
-        
+
         st.write("Segment Performance Metrics:")
         st.dataframe(segment_metrics)
+
 
     def create_brand_performance_overview(self):
         """Create brand performance overview"""
@@ -508,10 +573,22 @@ class StatisticalAnalyzer:
         self.time_series = self._prepare_time_series()
 
     def _prepare_time_series(self):
-        """Prepare time series data"""
-        df_time = self.df.copy()
-        df_time['Date'] = pd.to_datetime(df_time['Best Sales Period'])
-        return df_time.groupby('Date')['Monthly Sales'].sum().reset_index().set_index('Date')
+      df_time = self.df.copy()
+
+      # Clean and parse 'Best Sales Period'
+      df_time['Date'] = pd.to_datetime(
+          df_time['Best Sales Period'], 
+          format='%m/%d/%Y', 
+          errors='coerce'  # Coerce invalid dates to NaT
+      )
+      
+      # Drop rows with invalid or missing dates
+      df_time = df_time.dropna(subset=['Date'])
+
+      # Group by parsed dates and aggregate sales
+      time_series = df_time.groupby('Date')['Monthly Sales'].sum().reset_index().set_index('Date')
+
+      return time_series
 
     def run_statistical_analysis(self):
         """Run comprehensive statistical analysis"""
@@ -817,65 +894,80 @@ class CompetitiveAnalyzer:
         
         return strength_index.round(3)
 
-def run_competitive_analysis(self):
-    """Run comprehensive competitive analysis"""
-    st.header("Competitive Analysis Dashboard")
-    
-    analysis_type = st.selectbox(
-        "Select Analysis Type",
-        ["Market Position", "Brand Performance", "Competitive Strength",
-         "Price Analysis", "Growth Analysis", "Customer Perception"]
-    )
-    
-    if analysis_type == "Market Position":
-        self.analyze_market_position()
-    elif analysis_type == "Brand Performance":
-        self.analyze_brand_performance()
-    elif analysis_type == "Competitive Strength":
-        self.analyze_competitive_strength()
-    elif analysis_type == "Price Analysis":
-        self.analyze_price_competition()
-    elif analysis_type == "Growth Analysis":
-        self.analyze_growth_trends()
-    elif analysis_type == "Customer Perception":
-        self.analyze_customer_perception()
-
-
-def analyze_market_position(self):
-    """Analyze market positioning of brands"""
-    st.subheader("Market Position Analysis")
-    
-    # Access the 'brand_performance' metric and ensure it's correctly formatted
-    brand_performance = self.metrics['brand_performance'].reset_index()
-
-    # Check if all required columns are present and consistent in length
-    x_data = brand_performance[('Price', 'mean')]
-    y_data = brand_performance['Monthly Sales']
-    size_data = brand_performance['Monthly Revenue']
-    color_data = brand_performance['Reviews Rating']
-    
-    if len(x_data) == len(y_data) == len(size_data) == len(color_data):
-        fig_position = px.scatter(
-            brand_performance,
-            x=('Price', 'mean'),
-            y='Monthly Sales',
-            size='Monthly Revenue',
-            color='Reviews Rating',
-            text='Brand',
-            title="Market Position Map"
+    def run_competitive_analysis(self):
+        """Run comprehensive competitive analysis"""
+        st.header("Competitive Analysis Dashboard")
+        
+        analysis_type = st.selectbox(
+            "Select Analysis Type",
+            ["Market Position", "Brand Performance", "Competitive Strength",
+            "Price Analysis", "Growth Analysis", "Customer Perception"]
         )
-        st.plotly_chart(fig_position, use_container_width=True)
-        self.plots['position_map'] = fig_position
-    else:
-        st.error("Data length mismatch: Ensure 'Price', 'Monthly Sales', 'Monthly Revenue', and 'Reviews Rating' columns have the same length.")
+        
+        if analysis_type == "Market Position":
+            self.analyze_market_position()
+        elif analysis_type == "Brand Performance":
+            self.analyze_brand_performance()
+        elif analysis_type == "Competitive Strength":
+            self.analyze_competitive_strength()
+        elif analysis_type == "Price Analysis":
+            self.analyze_price_competition()
+        elif analysis_type == "Growth Analysis":
+            self.analyze_growth_trends()
+        elif analysis_type == "Customer Perception":
+            self.analyze_customer_perception()
 
-    # Display market position insights
-    st.subheader("Market Position Insights")
-    market_leader = self.metrics['market_share'].idxmax()
-    premium_brand = self.metrics['brand_performance'][('Price', 'mean')].idxmax()
-    
-    st.write(f"• Market Leader: {market_leader} with {self.metrics['market_share'][market_leader]:.1f}% market share")
-    st.write(f"• Premium Brand: {premium_brand} with average price ₹{self.metrics['brand_performance'].loc[premium_brand, ('Price', 'mean')]:,.2f}")
+
+    def analyze_market_position(self):
+      """Analyze market positioning of brands."""
+      st.subheader("Market Position Analysis")
+      
+      # Access the 'brand_performance' metric and flatten MultiIndex columns
+      brand_performance = self.metrics['brand_performance'].reset_index()
+      brand_performance.columns = ['_'.join(col).strip() if isinstance(col, tuple) else col for col in brand_performance.columns]
+
+      # Define required columns using flattened names
+      required_columns = ['Price_mean', 'Monthly Sales', 'Monthly Revenue', 'Reviews Rating']
+
+      # Check for missing columns
+      missing_columns = [col for col in required_columns if col not in brand_performance.columns]
+      if missing_columns:
+          st.error(f"Missing columns in brand_performance: {missing_columns}")
+          return
+
+      # Drop rows with missing values in required columns
+      brand_performance_clean = brand_performance.dropna(subset=required_columns)
+
+      if len(brand_performance_clean) == 0:
+          st.warning("No valid data available for market positioning.")
+          return
+
+      # Create the scatter plot
+      fig_position = px.scatter(
+          brand_performance_clean,
+          x='Price_mean',
+          y='Monthly Sales',
+          size='Monthly Revenue',
+          color='Reviews Rating',
+          text='Brand',
+          title="Market Position Map"
+      )
+      st.plotly_chart(fig_position, use_container_width=True)
+      self.plots['position_map'] = fig_position
+
+      # Display market position insights
+      st.subheader("Market Position Insights")
+      try:
+          market_leader = self.metrics['market_share'].idxmax()
+          premium_brand = brand_performance_clean.loc[brand_performance_clean['Price_mean'].idxmax(), 'Brand']
+          
+          st.write(f"• Market Leader: {market_leader} with {self.metrics['market_share'][market_leader]:.1f}% market share")
+          st.write(f"• Premium Brand: {premium_brand} with average price ₹{brand_performance_clean['Price_mean'].max():,.2f}")
+      except Exception as e:
+          st.error(f"Error generating market insights: {e}")
+
+
+
 
 
     def analyze_brand_performance(self):
